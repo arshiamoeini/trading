@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: option_platform
+      POSTGRES_USER: option
+      POSTGRES_PASSWORD: option
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U option -d option_platform"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports: ["5432:5432"]
+  migrate:
+    build: .
+    environment:
+      OPTION_PLATFORM_DATABASE_URL: postgresql+asyncpg://option:option@postgres:5432/option_platform
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    build: .
+    environment:
+      OPTION_PLATFORM_DATABASE_URL: postgresql+asyncpg://option:option@postgres:5432/option_platform
+    command: ["uvicorn", "option_platform.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports: ["8000:8000"]
+  runtime:
+    build: .
+    environment:
+      OPTION_PLATFORM_DATABASE_URL: postgresql+asyncpg://option:option@postgres:5432/option_platform
+    command: ["python", "-m", "option_platform.runtime.main"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+

@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Option Platform</title>
+<style>body{font:14px system-ui;margin:2rem;background:#10151c;color:#e8edf2}pre{background:#18212b;padding:1rem}b{color:#70d6ff}</style></head>
+<body><h1>Option Platform</h1><p><b>Paper trading only.</b> Live submission is unavailable.</p>
+<h2>Status</h2><pre id="status">loading…</pre><h2>Strategy runs and metrics</h2><pre id="runs">loading…</pre><h2>Events</h2><pre id="events"></pre>
+<script>
+async function refresh(){document.querySelector('#status').textContent=JSON.stringify(await (await fetch('/monitoring/status')).json(),null,2);document.querySelector('#runs').textContent=JSON.stringify(await (await fetch('/runs')).json(),null,2)}
+refresh(); setInterval(refresh,3000);
+const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/events`);
+ws.onmessage=e=>{const box=document.querySelector('#events');box.textContent=e.data+'\n'+box.textContent.slice(0,10000)};
+</script></body></html>
