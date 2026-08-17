@@ -42,6 +42,24 @@ class InstrumentRow(Base):
     settlement: Mapped[str | None] = mapped_column(String(16))
 
 
+class InstrumentIdentifierRow(Base):
+    __tablename__ = "instrument_identifiers"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_instrument_id", name="uq_instrument_identifier_provider_id"
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("instruments.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    provider_instrument_id: Mapped[str] = mapped_column(String(64))
+    venue: Mapped[str | None] = mapped_column(String(32), index=True)
+    raw_symbol: Mapped[str | None] = mapped_column(String(128))
+    isin: Mapped[str | None] = mapped_column(String(32), index=True)
+
+
 class StrategyDefinitionRow(Base):
     __tablename__ = "strategy_definitions"
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -65,12 +83,18 @@ class StrategyInstanceRow(Base):
 
 class MarketDatasetRow(Base):
     __tablename__ = "market_data_datasets"
+    __table_args__ = (
+        UniqueConstraint("source", "version", "capture_date", name="uq_dataset_capture"),
+    )
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     version: Mapped[str] = mapped_column(String(64))
-    content_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     source: Mapped[str] = mapped_column(String(128))
     point_in_time_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    capture_date: Mapped[date | None] = mapped_column(Date, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_params: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
 
 
 class MarketSnapshotRow(Base):
@@ -85,6 +109,43 @@ class MarketSnapshotRow(Base):
     sequence: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(128))
     content_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class MarketBarRow(Base):
+    __tablename__ = "market_data_bars"
+    __table_args__ = (
+        UniqueConstraint(
+            "source", "instrument_id", "timeframe", "trading_date",
+            name="uq_bar_source_instrument_timeframe_date"
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id", ondelete="CASCADE"))
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(128))
+    timeframe: Mapped[str] = mapped_column(String(16))
+    open_price: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    high_price: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    low_price: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    close_price: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    last_price: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    previous_close: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    trades: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    volume: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+    value: Mapped[Decimal] = mapped_column(Numeric(30, 10))
+
+
+class OrderBookSnapshotRow(Base):
+    __tablename__ = "market_data_order_books"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "observed_at", name="uq_order_book_instrument_observed"),
+    )
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id", ondelete="CASCADE"))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(128))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
