@@ -44,6 +44,25 @@ The generic adapter needs a provider profile and mapper. Tests use sanitized JSO
 and fake transports; they never call a live API. Vendor compatibility is only claimed after that
 vendor's payloads pass the shared adapter contract suite.
 
+## Tehran options market data
+
+The TSETMC collector reads TSE and IFB option chains and top-of-book quotes every five seconds.
+It records only valid two-sided quotes, while retaining every discovered contract in its option
+chain. Five-level order books are collected only for comma-separated `insCode` values configured
+in `OPTION_PLATFORM_TSETMC_DEPTH_WATCHLIST`.
+
+```bash
+alembic upgrade head
+option-platform-tsetmc --once
+option-platform-tsetmc
+option-platform-tsetmc --history-code 10417081465897562 --start 2026-01-01
+```
+
+On Windows the equivalent module command is
+`.venv\Scripts\python -m option_platform.runtime.market_collector`. Daily history is stored as
+OHLC bars and is never converted into synthetic bid/ask quotes. Full bid/ask replay starts with
+snapshots captured by the running collector.
+
 The initial migration installs a disabled recorded-data VerticalSpread example. Starting its
 instance through the API makes the separate runtime execute Risk -> OMS -> PaperBroker, atomically
 persist fills/positions/events, and store portfolio metrics. It never submits a live order.

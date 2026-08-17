@@ -1,29 +1,44 @@
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+from collections.abc import Iterable, Mapping
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from option_platform.domain.errors import DomainError
 from option_platform.domain.models import (
     Fill,
+    Instrument,
     MarketSnapshot,
+    OptionContract,
     OrderGroup,
     OrderLeg,
     OrderState,
     Side,
     StrategyRunState,
 )
-from option_platform.market_data.recording import SnapshotStore, decode_snapshot, snapshot_payload
+from option_platform.market_data.base import InstrumentIdentifier, MarketBar, OrderBookSnapshot
+from option_platform.market_data.recording import (
+    SnapshotStore,
+    content_hash,
+    decode_snapshot,
+    snapshot_payload,
+)
 
 from .models import (
     ExecutionEventRow,
     FillRow,
+    InstrumentIdentifierRow,
     InstrumentRow,
+    MarketBarRow,
+    MarketDatasetRow,
     MarketSnapshotRow,
+    OrderBookSnapshotRow,
     OrderGroupRow,
     OrderLegRow,
     PositionRow,
@@ -110,6 +125,9 @@ class PostgresSnapshotStore(SnapshotStore):
         self.session = session
 
     async def append(self, snapshot: MarketSnapshot) -> None:
+        payload = snapshot_payload(snapshot)
+        snapshot_hash = snapshot.content_hash or content_hash(payload)
+        payload["content_hash"] = snapshot_hash
         self.session.add(
             MarketSnapshotRow(
                 id=snapshot.snapshot_id,
@@ -118,8 +136,8 @@ class PostgresSnapshotStore(SnapshotStore):
                 received_at=snapshot.received_at,
                 sequence=snapshot.sequence,
                 source=snapshot.source,
-                content_hash=snapshot.content_hash,
-                payload=snapshot_payload(snapshot),
+                content_hash=snapshot_hash,
+                payload=payload,
             )
         )
         await self.session.commit()
@@ -133,6 +151,187 @@ class PostgresSnapshotStore(SnapshotStore):
             )
         ).all()
         return tuple(decode_snapshot(row.payload) for row in rows)
+
+
+class MarketDataRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def upsert_instruments(
+        self,
+        instruments: Iterable[Instrument],
+        identifiers: Mapping[UUID, InstrumentIdentifier],
+    ) -> None:
+        for instrument in instruments:
+            identifier = identifiers[instrument.instrument_id]
+            values: dict[str, object] = {
+                "id": instrument.instrument_id,
+                "kind": "OPTION" if isinstance(instrument, OptionContract) else "UNDERLYING",
+                "symbol": instrument.symbol,
+                "currency": instrument.currency,
+                "multiplier": instrument.multiplier,
+                "tick_size": instrument.tick_size,
+                "underlying_id": None,
+                "expiry": None,
+                "strike": None,
+                "option_right": None,
+                "exercise_style": None,
+                "settlement": None,
+            }
+            if isinstance(instrument, OptionContract):
+                values.update(
+                    {
+                        "underlying_id": instrument.underlying_id,
+                        "expiry": instrument.expiry,
+                        "strike": instrument.strike,
+                        "option_right": instrument.right.value,
+                        "exercise_style": instrument.exercise_style.value,
+                        "settlement": instrument.settlement.value,
+                    }
+                )
+            statement = insert(InstrumentRow).values(**values)
+            await self.session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[InstrumentRow.id],
+                    set_={key: value for key, value in values.items() if key != "id"},
+                )
+            )
+            identifier_values = {
+                "id": uuid4(),
+                "instrument_id": instrument.instrument_id,
+                "provider": identifier.provider,
+                "provider_instrument_id": identifier.provider_instrument_id,
+                "venue": identifier.venue,
+                "raw_symbol": identifier.raw_symbol,
+                "isin": identifier.isin,
+            }
+            identifier_statement = insert(InstrumentIdentifierRow).values(**identifier_values)
+            await self.session.execute(
+                identifier_statement.on_conflict_do_update(
+                    constraint="uq_instrument_identifier_provider_id",
+                    set_={
+                        key: value
+                        for key, value in identifier_values.items()
+                        if key not in {"id", "provider", "provider_instrument_id"}
+                    },
+                )
+            )
+        await self.session.commit()
+
+    async def get_or_create_dataset(
+        self,
+        capture_date: date,
+        created_at: datetime,
+        *,
+        source: str,
+        version: str,
+        source_params: Mapping[str, object] | None = None,
+    ) -> MarketDatasetRow:
+        existing = await self.session.scalar(
+            select(MarketDatasetRow).where(
+                MarketDatasetRow.source == source,
+                MarketDatasetRow.version == version,
+                MarketDatasetRow.capture_date == capture_date,
+            )
+        )
+        if existing is not None:
+            return existing
+        row = MarketDatasetRow(
+            id=uuid4(),
+            version=version,
+            content_hash=None,
+            source=source,
+            point_in_time_complete=False,
+            created_at=created_at,
+            capture_date=capture_date,
+            completed_at=None,
+            source_params=dict(source_params or {}),
+        )
+        self.session.add(row)
+        await self.session.commit()
+        return row
+
+    async def finalize_dataset(self, dataset_id: UUID, completed_at: datetime) -> None:
+        row = await self.session.get(MarketDatasetRow, dataset_id)
+        if row is None:
+            raise DomainError("cannot finalize an unknown market dataset")
+        hashes = (
+            await self.session.scalars(
+                select(MarketSnapshotRow.content_hash)
+                .where(MarketSnapshotRow.dataset_id == dataset_id)
+                .order_by(MarketSnapshotRow.provider_timestamp, MarketSnapshotRow.sequence)
+            )
+        ).all()
+        if not hashes:
+            return
+        capture_key = row.capture_date.isoformat() if row.capture_date is not None else "none"
+        identity = f"{row.source}:{row.version}:{capture_key}"
+        row.content_hash = hashlib.sha256(f"{identity}:{''.join(hashes)}".encode()).hexdigest()
+        row.point_in_time_complete = True
+        row.completed_at = completed_at
+        await self.session.commit()
+
+    async def snapshot_hash_exists(self, dataset_id: UUID, snapshot_hash: str) -> bool:
+        value = await self.session.scalar(
+            select(MarketSnapshotRow.id).where(
+                MarketSnapshotRow.dataset_id == dataset_id,
+                MarketSnapshotRow.content_hash == snapshot_hash,
+            )
+        )
+        return value is not None
+
+    async def upsert_bars(self, bars: Iterable[MarketBar]) -> None:
+        for bar in bars:
+            values = {
+                "id": uuid4(),
+                "instrument_id": bar.instrument_id,
+                "trading_date": bar.trading_date,
+                "event_at": bar.event_at,
+                "source": bar.source,
+                "timeframe": bar.timeframe,
+                "open_price": bar.open,
+                "high_price": bar.high,
+                "low_price": bar.low,
+                "close_price": bar.close,
+                "last_price": bar.last,
+                "previous_close": bar.previous_close,
+                "trades": bar.trades,
+                "volume": bar.volume,
+                "value": bar.value,
+            }
+            statement = insert(MarketBarRow).values(**values)
+            await self.session.execute(
+                statement.on_conflict_do_update(
+                    constraint="uq_bar_source_instrument_timeframe_date",
+                    set_={key: value for key, value in values.items() if key != "id"},
+                )
+            )
+        await self.session.commit()
+
+    async def append_order_book(self, book: OrderBookSnapshot) -> None:
+        payload: dict[str, object] = {
+            "levels": [
+                {
+                    "level": level.level,
+                    "bid": str(level.bid),
+                    "bid_size": str(level.bid_size),
+                    "bid_orders": level.bid_orders,
+                    "ask": str(level.ask),
+                    "ask_size": str(level.ask_size),
+                    "ask_orders": level.ask_orders,
+                }
+                for level in book.levels
+            ]
+        }
+        statement = insert(OrderBookSnapshotRow).values(
+            id=uuid4(),
+            instrument_id=book.instrument_id,
+            observed_at=book.observed_at,
+            source=book.source,
+            payload=payload,
+        )
+        await self.session.execute(statement.on_conflict_do_nothing())
+        await self.session.commit()
 
 
 class ExecutionRepository:

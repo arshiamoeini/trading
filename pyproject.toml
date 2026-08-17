@@ -15,9 +15,13 @@ dependencies = [
   "httpx>=0.27,<1",
   "pydantic-settings>=2.5,<3",
   "sqlalchemy[asyncio]>=2.0.35,<3",
+  "tzdata>=2025.2",
   "uvicorn[standard]>=0.30,<1",
   "websockets>=13,<16",
 ]
+
+[project.scripts]
+option-platform-tsetmc = "option_platform.runtime.market_collector:run_cli"
 
 [project.optional-dependencies]
 dev = [

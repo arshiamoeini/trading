@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     stale_after_seconds: int = 30
     runtime_poll_seconds: float = 1.0
     live_trading_enabled: bool = False
+    tsetmc_base_url: str = "https://cdn.tsetmc.com"
+    tsetmc_markets: str = "TSE,IFB"
+    tsetmc_poll_seconds: float = 5.0
+    tsetmc_timeout_seconds: float = 10.0
+    tsetmc_max_retries: int = 3
+    tsetmc_depth_watchlist: str = ""
+    tsetmc_depth_concurrency: int = 4
+    tsetmc_timezone: str = "Asia/Tehran"
 
     @model_validator(mode="after")
     def prohibit_live_trading(self) -> Settings:
