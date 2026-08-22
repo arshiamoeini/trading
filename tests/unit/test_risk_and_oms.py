@@ -42,6 +42,30 @@ def test_risk_boundary_and_multiple_reasons(at) -> None:
     assert set(decision.reasons) == {"max_debit_exceeded", "missing_quote"}
 
 
+def test_risk_uses_executable_vertical_debit_after_slippage(at) -> None:
+    spread = TradeIntent(
+        UUID(int=12),
+        UUID(int=11),
+        (
+            OrderLegIntent(UUID(int=1), Side.BUY, 1),
+            OrderLegIntent(UUID(int=2), Side.SELL, 1),
+        ),
+        at,
+        max_debit=Decimal("90"),
+    )
+    quotes = {
+        UUID(int=1): Quote(UUID(int=1), Decimal("100"), Decimal("120"), at, at, 1),
+        UUID(int=2): Quote(UUID(int=2), Decimal("40"), Decimal("50"), at, at, 1),
+    }
+
+    assert RiskEngine().evaluate(spread, quotes, at).approved
+
+    decision = RiskEngine(RiskLimits(slippage=Decimal("10"))).evaluate(spread, quotes, at)
+
+    assert not decision.approved
+    assert decision.reasons == ("executable_debit_exceeds_intent_limit",)
+
+
 def test_terminal_states_have_no_transitions() -> None:
     for state in (OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED):
         assert ALLOWED_TRANSITIONS[state] == frozenset()
