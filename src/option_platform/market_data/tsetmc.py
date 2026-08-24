@@ -105,6 +105,7 @@ class TsetmcMarketDataProvider:
         self._codes: dict[str, UUID] = {}
         self._chains: dict[UUID, OptionChain] = {}
         self._quotes: dict[UUID, Quote] = {}
+        self._underlying_last_prices: dict[UUID, Decimal] = {}
         self._snapshot: MarketSnapshot | None = None
         self._sequence = 0
         self._last_success: datetime | None = None
@@ -124,6 +125,11 @@ class TsetmcMarketDataProvider:
     @property
     def instrument_content_hash(self) -> str:
         return self._instrument_content_hash
+
+    @property
+    def underlying_last_prices(self) -> Mapping[UUID, Decimal]:
+        """Latest traded underlying prices included in the option-watch response."""
+        return self._underlying_last_prices
 
     def set_dataset_id(self, dataset_id: UUID) -> None:
         self.dataset_id = dataset_id
@@ -197,6 +203,7 @@ class TsetmcMarketDataProvider:
         metadata: dict[UUID, InstrumentIdentifier] = {}
         contracts_by_underlying: dict[UUID, dict[UUID, OptionContract]] = {}
         quotes: dict[UUID, Quote] = {}
+        underlying_last_prices: dict[UUID, Decimal] = {}
         invalid_quotes = 0
 
         for venue, payload in responses:
@@ -216,6 +223,9 @@ class TsetmcMarketDataProvider:
                     tick_size=Decimal("1"),
                 )
                 instruments[underlying_id] = underlying
+                underlying_price = _decimal(raw_row.get("pDrCotVal_UA", 0), "underlying last")
+                if underlying_price > 0:
+                    underlying_last_prices[underlying_id] = underlying_price
                 metadata[underlying_id] = InstrumentIdentifier(
                     "tsetmc", underlying_code, venue, raw_symbol=underlying.symbol
                 )
@@ -313,6 +323,7 @@ class TsetmcMarketDataProvider:
         self._codes = {item.provider_instrument_id: key for key, item in metadata.items()}
         self._chains = chains
         self._quotes = quotes
+        self._underlying_last_prices = underlying_last_prices
         self._invalid_quote_count = invalid_quotes
         self._instrument_content_hash = instrument_hash
         return MarketSnapshot(
