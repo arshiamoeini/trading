@@ -143,11 +143,12 @@ def _export_row(
     enriched["business_days_to_expiry"] = _business_days_to_expiry(as_of, expiry)
     enriched["average_traded_value_5d"] = average_traded_value_5d
     enriched["entry_profit_percent"] = (spot - option_price - strike) / spot * Decimal("100")
+    pricing_days = max(days_to_expiry - 1, 0)
     metrics = call_metrics_from_market_price(
         option_price,
         spot,
         strike,
-        Decimal(days_to_expiry) / Decimal("365"),
+        Decimal(pricing_days) / Decimal("365"),
         risk_free_rate,
     )
     enriched["implied_volatility_percent"] = (
