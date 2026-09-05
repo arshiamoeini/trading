@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
 from option_platform.analytics.portfolio import PortfolioMetrics, SimulatedPortfolio
-from option_platform.domain.models import Fill, Instrument, MarketSnapshot, Side, TradeIntent
+from option_platform.domain.models import Fill, Instrument, MarketSnapshot, Quote, Side, TradeIntent
+from option_platform.market_data.base import OrderBookSnapshot
 from option_platform.runtime.clock import FrozenClock, SequentialIdGenerator
 from option_platform.strategy_sdk.base import Strategy
 from option_platform.strategy_sdk.context import FakeStrategyContext
@@ -43,6 +44,40 @@ class FillModel:
         actual = reference + self.slippage if side is Side.BUY else reference - self.slippage
         return max(Decimal("0"), actual), reference
 
+    def execute(
+        self,
+        side: Side,
+        quantity: int,
+        quote: Quote,
+        order_book: OrderBookSnapshot | None = None,
+    ) -> tuple[int, Decimal, Decimal]:
+        if order_book is None:
+            size = quote.ask_size if side is Side.BUY else quote.bid_size
+            price, reference = self.price(side, quote.bid, quote.ask)
+            return quantity if size is None else min(quantity, int(size)), price, reference
+
+        remaining = quantity
+        filled = 0
+        notional = Decimal("0")
+        top_reference = quote.ask if side is Side.BUY else quote.bid
+        levels = tuple(sorted(order_book.levels, key=lambda item: item.level))
+        for level in levels:
+            if remaining <= 0:
+                break
+            level_size = level.ask_size if side is Side.BUY else level.bid_size
+            level_quantity = min(remaining, int(level_size))
+            if level_quantity <= 0:
+                continue
+            level_price = level.ask if side is Side.BUY else level.bid
+            price = level_price + self.slippage if side is Side.BUY else level_price - self.slippage
+            price = max(Decimal("0"), price)
+            notional += price * level_quantity
+            filled += level_quantity
+            remaining -= level_quantity
+        if filled == 0:
+            return 0, Decimal("0"), top_reference
+        return filled, notional / Decimal(filled), top_reference
+
 
 @dataclass(frozen=True, slots=True)
 class BacktestResult:
@@ -72,6 +107,7 @@ class BacktestEngine:
         *,
         initial_cash: Decimal = Decimal("100000"),
         indicator: Callable[[MarketSnapshot], Decimal | None] | None = None,
+        order_books: Mapping[tuple[datetime, UUID], OrderBookSnapshot] | None = None,
     ) -> BacktestResult:
         if not snapshots:
             raise ValueError("backtest requires snapshots")
@@ -96,7 +132,16 @@ class BacktestEngine:
                 group_id = ids.new()
                 for leg in intent.legs:
                     quote = snapshot.quotes[leg.instrument_id]
-                    price, reference = self.fill_model.price(leg.side, quote.bid, quote.ask)
+                    order_book = (
+                        None
+                        if order_books is None
+                        else order_books.get((snapshot.provider_timestamp, leg.instrument_id))
+                    )
+                    quantity, price, reference = self.fill_model.execute(
+                        leg.side, leg.quantity, quote, order_book
+                    )
+                    if quantity == 0:
+                        continue
                     fill = Fill(
                         fill_id=ids.new(),
                         execution_id=f"backtest-{ids.new()}",
@@ -105,9 +150,9 @@ class BacktestEngine:
                         instrument_id=leg.instrument_id,
                         strategy_instance_id=intent.strategy_instance_id,
                         side=leg.side,
-                        quantity=leg.quantity,
+                        quantity=quantity,
                         price=price,
-                        commission=self.fill_model.commission_per_contract * leg.quantity,
+                        commission=self.fill_model.commission_per_contract * quantity,
                         occurred_at=clock.now(),
                         quote_midpoint=quote.midpoint,
                         reference_price=reference,
